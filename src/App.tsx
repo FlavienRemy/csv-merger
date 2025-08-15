@@ -1,4 +1,3 @@
-import React from 'react';
 import { FileUpload } from './components/FileUpload';
 import { MergeConfiguration } from './components/MergeConfiguration';
 import { ColumnConflicts } from './components/ColumnConflicts';

@@ -1,5 +1,5 @@
 import Papa from 'papaparse';
-import { CsvData, MergeConfig, MergeResult } from '../types/csv';
+import type { CsvData, MergeConfig, MergeResult } from '../types/csv';
 
 export const parseCsvFile = (file: File): Promise<CsvData> => {
   return new Promise((resolve, reject) => {
@@ -8,13 +8,13 @@ export const parseCsvFile = (file: File): Promise<CsvData> => {
       skipEmptyLines: true,
       complete: (results) => {
         if (results.errors.length > 0) {
-          reject(new Error(`Erreur lors du parsing: ${results.errors[0].message}`));
+          reject(new Error('Erreur lors du parsing du fichier CSV'));
           return;
         }
-        
+
         const data = results.data as Record<string, any>[];
         const headers = Object.keys(data[0] || {});
-        
+
         resolve({
           data,
           headers,
@@ -35,85 +35,139 @@ export const mergeCsvFiles = (
 ): MergeResult => {
   const { primaryKey, secondaryKey, mergeType } = config;
   
-  // Créer un index du fichier secondaire pour une recherche rapide
-  const secondaryIndex = new Map<string, Record<string, any>>();
+  // Create a map of secondary file data for quick lookup
+  const secondaryMap = new Map();
   secondaryFile.data.forEach(row => {
     const key = row[secondaryKey];
-    if (key) {
-      secondaryIndex.set(key.toString(), row);
+    if (key !== undefined) {
+      secondaryMap.set(key, row);
     }
   });
+
+  // Find conflicting columns
+  const conflictingColumns: string[] = [];
+  const ignoredColumns: string[] = [];
   
-  // Identifier les colonnes en conflit
-  const primaryHeaders = new Set(primaryFile.headers);
-  const conflictingColumns = secondaryFile.headers.filter(header => 
-    primaryHeaders.has(header) && header !== secondaryKey
-  );
-  
-  // Colonnes à ignorer (conflits)
-  const ignoredColumns = conflictingColumns;
-  
-  // Colonnes à ajouter du fichier secondaire
-  const columnsToAdd = secondaryFile.headers.filter(header => 
-    !primaryHeaders.has(header) || header === secondaryKey
-  );
-  
-  const mergedData: Record<string, any>[] = [];
-  const conflicts: string[] = [];
-  
-  // Traiter chaque ligne du fichier principal
-  primaryFile.data.forEach(primaryRow => {
-    const primaryKeyValue = primaryRow[primaryKey];
-    const secondaryRow = primaryKeyValue ? secondaryIndex.get(primaryKeyValue.toString()) : null;
-    
-    // Créer la ligne fusionnée
-    const mergedRow = { ...primaryRow };
-    
-    if (secondaryRow) {
-      // Ajouter les colonnes non-conflictuelles du fichier secondaire
-      columnsToAdd.forEach(column => {
-        if (column !== secondaryKey) {
-          mergedRow[column] = secondaryRow[column];
-        }
-      });
-    } else {
-      // Si pas de correspondance, remplir avec des valeurs vides
-      columnsToAdd.forEach(column => {
-        if (column !== secondaryKey) {
-          mergedRow[column] = '';
-        }
-      });
+  secondaryFile.headers.forEach(header => {
+    if (header !== secondaryKey) {
+      if (primaryFile.headers.includes(header)) {
+        conflictingColumns.push(header);
+      } else {
+        ignoredColumns.push(header);
+      }
     }
-    
-    mergedData.push(mergedRow);
   });
-  
-  // Pour les autres types de merge (right, inner, outer)
-  if (mergeType === 'right' || mergeType === 'outer') {
-    const processedKeys = new Set(primaryFile.data.map(row => row[primaryKey]?.toString()));
-    
-    secondaryFile.data.forEach(secondaryRow => {
-      const secondaryKeyValue = secondaryRow[secondaryKey];
-      if (!processedKeys.has(secondaryKeyValue?.toString())) {
-        const mergedRow: Record<string, any> = {};
-        
-        // Remplir avec des valeurs vides pour les colonnes du fichier principal
-        primaryFile.headers.forEach(header => {
-          mergedRow[header] = '';
-        });
-        
-        // Ajouter les données du fichier secondaire
+
+  // Merge data based on merge type
+  let mergedData: Record<string, any>[] = [];
+
+  if (mergeType === 'left') {
+    mergedData = primaryFile.data.map(primaryRow => {
+      const key = primaryRow[primaryKey];
+      const secondaryRow = secondaryMap.get(key);
+      
+      if (secondaryRow) {
+        // Merge with secondary data, prioritizing primary for conflicts
+        const mergedRow = { ...primaryRow };
         secondaryFile.headers.forEach(header => {
-          if (!primaryHeaders.has(header) || header === secondaryKey) {
+          if (header !== secondaryKey && !conflictingColumns.includes(header)) {
             mergedRow[header] = secondaryRow[header];
           }
         });
+        return mergedRow;
+      } else {
+        // No match found, keep primary data with empty secondary columns
+        const mergedRow = { ...primaryRow };
+        ignoredColumns.forEach(header => {
+          mergedRow[header] = '';
+        });
+        return mergedRow;
+      }
+    });
+  } else if (mergeType === 'right') {
+    mergedData = secondaryFile.data.map(secondaryRow => {
+      const key = secondaryRow[secondaryKey];
+      const primaryRow = primaryFile.data.find(row => row[primaryKey] === key);
+      
+      if (primaryRow) {
+        // Merge with primary data, prioritizing secondary for conflicts
+        const mergedRow = { ...secondaryRow };
+        primaryFile.headers.forEach(header => {
+          if (header !== primaryKey && !conflictingColumns.includes(header)) {
+            mergedRow[header] = primaryRow[header];
+          }
+        });
+        return mergedRow;
+      } else {
+        // No match found, keep secondary data with empty primary columns
+        const mergedRow = { ...secondaryRow };
+        primaryFile.headers.forEach(header => {
+          if (header !== primaryKey && !conflictingColumns.includes(header)) {
+            mergedRow[header] = '';
+          }
+        });
+        return mergedRow;
+      }
+    });
+  } else if (mergeType === 'inner') {
+    mergedData = primaryFile.data
+      .filter(primaryRow => {
+        const key = primaryRow[primaryKey];
+        return secondaryMap.has(key);
+      })
+      .map(primaryRow => {
+        const key = primaryRow[primaryKey];
+        const secondaryRow = secondaryMap.get(key);
         
-        mergedData.push(mergedRow);
+        // Merge with secondary data, prioritizing primary for conflicts
+        const mergedRow = { ...primaryRow };
+        secondaryFile.headers.forEach(header => {
+          if (header !== secondaryKey && !conflictingColumns.includes(header)) {
+            mergedRow[header] = secondaryRow[header];
+          }
+        });
+        return mergedRow;
+      });
+  } else if (mergeType === 'outer') {
+    // Union of all keys
+    const allKeys = new Set([
+      ...primaryFile.data.map(row => row[primaryKey]),
+      ...secondaryFile.data.map(row => row[secondaryKey])
+    ]);
+
+    mergedData = Array.from(allKeys).map(key => {
+      const primaryRow = primaryFile.data.find(row => row[primaryKey] === key);
+      const secondaryRow = secondaryMap.get(key);
+      
+      if (primaryRow && secondaryRow) {
+        // Both exist, merge with primary priority
+        const mergedRow = { ...primaryRow };
+        secondaryFile.headers.forEach(header => {
+          if (header !== secondaryKey && !conflictingColumns.includes(header)) {
+            mergedRow[header] = secondaryRow[header];
+          }
+        });
+        return mergedRow;
+      } else if (primaryRow) {
+        // Only primary exists
+        const mergedRow = { ...primaryRow };
+        ignoredColumns.forEach(header => {
+          mergedRow[header] = '';
+        });
+        return mergedRow;
+      } else {
+        // Only secondary exists
+        const mergedRow = { ...secondaryRow };
+        primaryFile.headers.forEach(header => {
+          if (header !== primaryKey && !conflictingColumns.includes(header)) {
+            mergedRow[header] = '';
+          }
+        });
+        return mergedRow;
       }
     });
   }
-  
+
   return {
     mergedData,
     conflicts: conflictingColumns,
